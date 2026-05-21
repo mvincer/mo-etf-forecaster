@@ -11,7 +11,7 @@
 # Usage:
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File `
-#     "C:\Users\mrmhr\OneDrive\Documents\Python\Mo_Dash\ETF\ETF Forecaster\project\scripts\setup_fx_daily_refresh_task.ps1"
+#     "C:\Dev\Mo_Dash\ETF\ETF Forecaster\project\scripts\setup_fx_daily_refresh_task.ps1"
 #
 # Remove later:
 #

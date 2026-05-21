@@ -49,8 +49,7 @@ def _fxcm_fc_module_reload():
 
 _ETF_PROJECT_ROOT_DEFAULTS: tuple[Path, ...] = (
     Path(__file__).resolve().parents[2],
-    Path(r"C:\Users\mrmhr\OneDrive\Documents\Python\Mo_Dash\ETF\ETF Forecaster"),
-    Path(r"C:\Users\mrmhr\OneDrive\Documents\Python\ETF Forecaster"),
+    Path(r"C:\Dev\Mo_Dash\ETF\ETF Forecaster"),
 )
 
 
@@ -68,7 +67,6 @@ def _fx_project_root_defaults() -> tuple[Path, ...]:
             seen.add(key)
             out.append(p)
     for p in (
-        Path(r"C:\Users\mrmhr\OneDrive\Documents\Python\FX_NonLinear_Forecast_Direction"),
         Path(__file__).resolve().parents[2] / "FX_NonLinear_Forecast_Direction",
     ):
         key = str(p)
@@ -938,11 +936,13 @@ def render_fx_forecast_tab(default_email: str) -> None:
         st.divider()
 
     if xlsx_path is None:
+        fxnl_roots = _FX_PROJECT_ROOT_DEFAULTS
+        manual_cwd = str(fxnl_roots[0]) if fxnl_roots else r"<Mo_Dash>\FX\FX forecasts\non-linear FX forecast - daily_binary_fx_forecast"
         st.warning(
             "No FX forecast workbook found yet. Click **↻ Refresh forecasts now** to build one, "
             "or run the daily report manually:\n\n"
             "```powershell\n"
-            "cd \"C:\\Users\\mrmhr\\OneDrive\\Documents\\Python\\Mo_Dash\\FX\\FX forecasts\\non-linear FX forecast - daily_binary_fx_forecast\"\n"
+            f"cd \"{manual_cwd}\"\n"
             "py -3 -m fxnl.daily_binary_forecast_report --align-to-next-bar --inject-live-quote\n"
             "```"
         )

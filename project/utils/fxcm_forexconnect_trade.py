@@ -4,8 +4,12 @@ Credentials and server settings come from environment variables or Streamlit sec
 
 Order size (default): **% of account equity × leverage** (equity from ForexConnect). Target notional is in
 **account currency**, converted to the traded pair's **base currency** using subscribed **OFFERS** mids, then
-``lots = notional_base / base_unit_size``. Override account currency with **``FXCM_FC_ACCOUNT_CURRENCY``** if needed.
-Optional **``lots``** bypasses that path. ``AMOUNT`` = ``base_unit_size × lots`` (capped by ``FXCM_FC_MAX_LOTS``).
+``lots = notional_base / base_unit_size`` (each ``lot`` here is one **``base_unit_size``** step from
+``TradingSettingsProvider.get_base_unit_size``). If the account row does not expose currency, set
+**``FXCM_FC_ACCOUNT_CURRENCY``**; otherwise cross conversion from equity notional to the pair's base uses the wrong FX graph.
+Optional **``lots``** bypasses the notional path. **``AMOUNT``** on ``TRUE_MARKET_OPEN`` must be an **integer multiple**
+of ``base_unit_size``; the server returns *Quantity fraction size violated* if ``round(lots × size)`` drifts off that
+grid (we send ``floor(lots) × base_unit_size`` after capping). Capped by ``FXCM_FC_MAX_LOTS`` (max **lot steps**).
 Each **true market** entry requests an attached **stop** via ``RATE_STOP`` (default **1%** from the live bid/ask:
 below ask for buys, above bid for sells). If the broker rejects entry+stop, the order is sent **without** an attached
 stop and the return message tells you the theoretical stop level.
@@ -497,12 +501,59 @@ def _resolve_order_lots(
     )
 
 
-def _lots_to_amount(base_unit_size: float, lots: float, settings: FxcmForexConnectSettings) -> tuple[int, float]:
-    """Return ``(AMOUNT, effective_lots)`` for ``TRUE_MARKET_OPEN`` (``AMOUNT`` = base units × lots)."""
+def _lots_to_amount(
+    base_unit_size: float,
+    lots: float,
+    settings: FxcmForexConnectSettings,
+    *,
+    tsp: Any | None = None,
+    symbol: str | None = None,
+    account: Any | None = None,
+) -> tuple[int, float]:
+    """Return ``(AMOUNT, effective_lots)`` for ``TRUE_MARKET_OPEN``.
+
+    ``AMOUNT`` is **base-currency units** and must be an integer multiple of ``base_unit_size`` (FXCM / DAS rejects
+    arbitrary integers, e.g. ORA-20173 *Quantity fraction size violated*). We use whole **lot steps**:
+    ``floor(effective_lots) × round(base_unit_size)``, then optionally raise to ``get_min_quantity`` when the API
+    exposes it.
+    """
+    bus = float(base_unit_size)
+    if not math.isfinite(bus) or bus <= 0:
+        raise RuntimeError(f"Invalid base_unit_size from ForexConnect: {base_unit_size!r}")
+    bus_i = max(1, int(round(bus)))
     eff = _effective_lots(lots, settings)
-    raw = float(base_unit_size) * eff
-    amount = int(max(1, round(raw)))
-    return amount, eff
+    lot_steps = int(math.floor(float(eff) + 1e-9))
+    if lot_steps < 1:
+        raise RuntimeError(
+            "Order size is below **one** minimum increment for this instrument "
+            f"({bus_i:,} base units per step). Increase **% of equity** or **leverage**, "
+            f"or pass explicit **lots** ≥ 1. (Computed lot steps ≈ {eff:g} before flooring.)"
+        )
+    amount = lot_steps * bus_i
+
+    if tsp is not None and symbol and account is not None:
+        try:
+            min_q = int(float(tsp.get_min_quantity(symbol, account)))
+        except Exception:
+            min_q = bus_i
+        try:
+            max_q = float(tsp.get_max_quantity(symbol, account))
+        except Exception:
+            max_q = float("inf")
+        if min_q > 0 and amount < min_q:
+            bump = int(math.ceil(min_q / float(bus_i)))
+            amount = bump * bus_i
+            lot_steps = bump
+        if math.isfinite(max_q) and max_q > 0 and amount > max_q:
+            lot_steps = int(math.floor(max_q / float(bus_i)))
+            amount = max(bus_i, lot_steps * bus_i)
+            if amount > max_q:
+                raise RuntimeError(
+                    f"Order size exceeds broker **max quantity** ({max_q:g} base units) after lot-grid snapping."
+                )
+
+    eff_out = float(amount) / float(bus_i)
+    return int(amount), eff_out
 
 
 def _fc_offer_bid_ask_digits(offer: Any) -> tuple[float, float, int]:
@@ -768,7 +819,14 @@ def execute_fc_market_order(
                 account=account,
                 settings=settings,
             )
-            amount, eff_lots = _lots_to_amount(base_unit_size, resolved_lots, settings)
+            amount, eff_lots = _lots_to_amount(
+                base_unit_size,
+                resolved_lots,
+                settings,
+                tsp=tsp,
+                symbol=display_symbol,
+                account=account,
+            )
 
             request, sl_note = _create_market_entry_request(
                 fx,
@@ -913,7 +971,14 @@ def execute_fc_market_orders_sequence(
                     settings=settings,
                 )
                 base_unit_size = tsp.get_base_unit_size(sym, account)
-                amount, eff_lots = _lots_to_amount(base_unit_size, resolved_per, settings)
+                amount, eff_lots = _lots_to_amount(
+                    base_unit_size,
+                    resolved_per,
+                    settings,
+                    tsp=tsp,
+                    symbol=sym,
+                    account=account,
+                )
 
                 request, sl_note = _create_market_entry_request(
                     fx,
@@ -981,6 +1046,193 @@ def execute_fc_market_orders_sequence(
                 pass
 
     return "\n".join(lines)
+
+
+def list_open_fc_trades(*, settings: FxcmForexConnectSettings) -> list[dict[str, Any]]:
+    """List all open positions for ``settings.account``.
+
+    Returns a list of dicts: ``trade_id``, ``primary`` (e.g. ``EUR/USD``), ``side``
+    (``buy``/``sell``), ``amount`` (int FXCM AMOUNT), ``lots`` (``amount /
+    lots_divisor``), ``open_rate`` (float), ``gross_pl`` (float).
+
+    Bridges into the ``.venv-fc`` sidecar when ``forexconnect`` is not importable
+    in the current interpreter (same pattern as :func:`execute_fc_market_order`).
+    """
+    validate_fc_settings(settings)
+    if os.environ.get("_FC_WORKER_PROCESS") != "1":
+        bridge = _fc_bridge_python_exe()
+        if bridge is not None:
+            payload = {"op": "list_trades", "settings": asdict(settings)}
+            raw = _run_fc_worker(payload, timeout=90.0)
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError as e:
+                raise RuntimeError(f"list_open_fc_trades worker returned non-JSON output: {raw!r}") from e
+    if not _forexconnect_importable():
+        raise RuntimeError(
+            "No **.venv-fc** bridge and ``forexconnect`` is not importable here — cannot list positions."
+        )
+    fxcorepy, ForexConnect, Common = _load_forexconnect()
+    out: list[dict[str, Any]] = []
+    with ForexConnect() as fx:
+        try:
+            fx.login(
+                settings.user,
+                settings.password,
+                settings.url,
+                settings.connection,
+                settings.session,
+                settings.pin,
+                _session_status_changed,
+            )
+            account = Common.get_account(fx, settings.account)
+            if not account:
+                raise RuntimeError("No valid account — set **FXCM_FC_ACCOUNT** or check login.")
+            acc_id = str(account.account_id)
+            for trade in _iter_fc_trades(fx, ForexConnect, fxcorepy):
+                if str(getattr(trade, "account_id", "") or "") != acc_id:
+                    continue
+                amt = int(getattr(trade, "amount", 0) or 0)
+                bs = str(getattr(trade, "buy_sell", "") or "").upper()
+                out.append(
+                    {
+                        "trade_id": str(getattr(trade, "trade_id", "") or ""),
+                        "primary": str(getattr(trade, "instrument", "") or ""),
+                        "side": "buy" if bs == "B" else "sell",
+                        "amount": amt,
+                        "lots": (amt / settings.lots_divisor) if settings.lots_divisor else 0.0,
+                        "open_rate": float(getattr(trade, "open_rate", 0.0) or 0.0),
+                        "gross_pl": float(getattr(trade, "gross_pl", 0.0) or 0.0),
+                    }
+                )
+        finally:
+            sleep(0.2)
+            try:
+                fx.logout()
+            except Exception:
+                pass
+    return out
+
+
+def _iter_fc_trades(fx: Any, ForexConnect: Any, fxcorepy: Any) -> list[Any]:
+    """Same fallback pattern as :func:`_iter_fc_offer_rows`, for the TRADES table."""
+    from forexconnect.errors import TableManagerError  # noqa: PLC0415
+
+    try:
+        return list(fx.get_table(ForexConnect.TRADES))
+    except TableManagerError:
+        return list(fx.get_table_reader(fxcorepy.O2GTableType.TRADES))
+
+
+def close_fc_trade(
+    *,
+    trade_id: str,
+    settings: FxcmForexConnectSettings,
+    order_wait_sec: float = 25.0,
+) -> str:
+    """Close a single open position at market by ``trade_id``.
+
+    Uses ``TRUE_MARKET_CLOSE`` with the opposite ``BUY_SELL`` and the trade's full
+    ``AMOUNT`` (no partial closes here — keep behaviour predictable for the daily
+    auto-trade pass). Returns a human-readable status string identical in spirit
+    to :func:`execute_fc_market_order` so it can be rendered the same way.
+    """
+    validate_fc_settings(settings)
+    tid = str(trade_id or "").strip()
+    if not tid:
+        raise RuntimeError("close_fc_trade requires a non-empty trade_id.")
+    if os.environ.get("_FC_WORKER_PROCESS") != "1":
+        bridge = _fc_bridge_python_exe()
+        if bridge is not None:
+            payload = {
+                "op": "close",
+                "settings": asdict(settings),
+                "trade_id": tid,
+                "order_wait_sec": float(order_wait_sec),
+            }
+            return _run_fc_worker(payload, timeout=180.0)
+    if not _forexconnect_importable():
+        raise RuntimeError(
+            "No **.venv-fc** bridge and ``forexconnect`` is not importable here — cannot close positions."
+        )
+    fxcorepy, ForexConnect, Common = _load_forexconnect()
+
+    display_symbol = ""
+    was_buy = False
+    order_id = "?"
+    ok = False
+
+    with ForexConnect() as fx:
+        orders_listener = None
+        try:
+            fx.login(
+                settings.user,
+                settings.password,
+                settings.url,
+                settings.connection,
+                settings.session,
+                settings.pin,
+                _session_status_changed,
+            )
+            account = Common.get_account(fx, settings.account)
+            if not account:
+                raise RuntimeError("No valid account — set **FXCM_FC_ACCOUNT** or check login.")
+            acc_id = str(account.account_id)
+
+            target = None
+            for tr in _iter_fc_trades(fx, ForexConnect, fxcorepy):
+                if str(getattr(tr, "trade_id", "") or "") == tid:
+                    target = tr
+                    break
+            if target is None:
+                raise RuntimeError(
+                    f"Trade **{tid}** not found among open positions for account **{acc_id}**."
+                )
+            display_symbol = str(getattr(target, "instrument", "") or "")
+            amount = int(getattr(target, "amount", 0) or 0)
+            was_buy = str(getattr(target, "buy_sell", "") or "").upper() == "B"
+            close_side = "S" if was_buy else "B"
+
+            req = fx.create_order_request(
+                order_type=fxcorepy.Constants.Orders.TRUE_MARKET_CLOSE,
+                ACCOUNT_ID=acc_id,
+                BUY_SELL=close_side,
+                AMOUNT=amount,
+                TRADE_ID=tid,
+                SYMBOL=display_symbol,
+            )
+            if req is None:
+                raise RuntimeError(
+                    f"ForexConnect refused TRUE_MARKET_CLOSE for trade **{tid}** "
+                    f"({display_symbol}, AMOUNT {amount})."
+                )
+
+            orders_monitor = _OrdersMonitor()
+            orders_table = fx.get_table(ForexConnect.ORDERS)
+            orders_listener = Common.subscribe_table_updates(
+                orders_table,
+                on_add_callback=orders_monitor.on_added_order,
+                on_delete_callback=orders_monitor.on_deleted_order,
+                on_change_callback=orders_monitor.on_changed_order,
+            )
+            resp = fx.send_request(req)
+            order_id = resp.order_id
+            ok = orders_monitor.wait_lifecycle(order_wait_sec, order_id)
+        finally:
+            if orders_listener is not None:
+                try:
+                    orders_listener.unsubscribe()
+                except Exception:
+                    pass
+            sleep(0.5)
+            try:
+                fx.logout()
+            except Exception:
+                pass
+
+    side_was = "BUY" if was_buy else "SELL"
+    suffix = "" if ok else " (order lifecycle timeout)"
+    return f"CLOSE **{display_symbol}** (was {side_was}) · TradeID **{tid}** · OrderID **{order_id}**{suffix}."
 
 
 def fc_pair_display(primary: str) -> str:

@@ -31,8 +31,10 @@ def main() -> int:
 
     from utils.fxcm_forexconnect_trade import (  # noqa: PLC0415
         FxcmForexConnectSettings,
+        close_fc_trade,
         execute_fc_market_order,
         execute_fc_market_orders_sequence,
+        list_open_fc_trades,
         test_fc_login,
     )
 
@@ -41,6 +43,18 @@ def main() -> int:
 
     if op == "login_test":
         print(test_fc_login(settings))
+        return 0
+    if op == "list_trades":
+        print(json.dumps(list_open_fc_trades(settings=settings)))
+        return 0
+    if op == "close":
+        print(
+            close_fc_trade(
+                trade_id=str(payload["trade_id"]),
+                settings=settings,
+                order_wait_sec=float(payload.get("order_wait_sec", 25.0)),
+            )
+        )
         return 0
     if op == "single":
         lots_v = payload.get("lots")

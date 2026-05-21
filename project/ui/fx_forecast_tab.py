@@ -23,9 +23,21 @@ import pandas as pd
 import streamlit as st
 
 from ui.email_report import send_html_email
-from utils.fx_currency_exposure import currency_leg_counts, plan_equal_bias_orders
+from utils.auto_trade_config import AutoTradeConfig, default_config_path, load_config, save_config
+from utils.fx_currency_exposure import (
+    currency_leg_counts,
+    pair_likelihood_scores,
+    plan_equal_bias_orders,
+)
 from utils.fx_latest_inputs_preview import load_fx_input_preview
 from utils.fx_signal_side import classify_signal_side
+from utils.mo_dash_layout import (
+    fx_data_collect_import_cwd,
+    fx_data_collect_package_dir,
+    fx_nl_project_root,
+    mo_dash_fx_forecast_xlsx,
+    mo_dash_workspace_root,
+)
 from utils.fxcm_forexconnect_trade import fc_pair_display, fc_settings_from_env
 
 
@@ -35,59 +47,45 @@ def _fxcm_fc_module_reload():
 
     return importlib.reload(m)
 
-_FX_PROJECT_ROOT_DEFAULTS: tuple[Path, ...] = (
-    Path(r"C:\Users\mrmhr\OneDrive\Documents\Python\FX_NonLinear_Forecast_Direction"),
-    Path(__file__).resolve().parents[2] / "FX_NonLinear_Forecast_Direction",
-)
-
 _ETF_PROJECT_ROOT_DEFAULTS: tuple[Path, ...] = (
-    Path(r"C:\Users\mrmhr\OneDrive\Documents\Python\ETF Forecaster"),
     Path(__file__).resolve().parents[2],
+    Path(r"C:\Users\mrmhr\OneDrive\Documents\Python\Mo_Dash\ETF\ETF Forecaster"),
+    Path(r"C:\Users\mrmhr\OneDrive\Documents\Python\ETF Forecaster"),
 )
 
 
-def _mo_dash_workspace_root(etf_root: Path) -> Path:
-    """Folder that contains ``FX/``, ``ETF/``, ``Dashboard/`` (not the git repo root).
-
-    Resolution order:
-
-    1. **``MO_DASH_ROOT``** env — explicit workspace path.
-    2. **Parent layout** — repo at ``…/Mo_Dash/ETF/ETF Forecaster`` → workspace is ``…/Mo_Dash``.
-    3. **Legacy** — workspace is ``<etf_root>/Mo_Dash`` (Mo_Dash inside the repo).
-    """
-    env = (os.environ.get("MO_DASH_ROOT") or "").strip()
-    if env:
-        return Path(env).expanduser().resolve()
-    er = etf_root.resolve()
-    if (
-        er.name.lower() == "etf forecaster"
-        and er.parent.name.lower() == "etf"
-        and er.parent.parent.name.lower() == "mo_dash"
+def _fx_project_root_defaults() -> tuple[Path, ...]:
+    """Candidate FX non-linear project locations, Mo_Dash first."""
+    out: list[Path] = []
+    seen: set[str] = set()
+    for er in _ETF_PROJECT_ROOT_DEFAULTS:
+        try:
+            p = fx_nl_project_root(er)
+        except Exception:
+            continue
+        key = str(p)
+        if key not in seen:
+            seen.add(key)
+            out.append(p)
+    for p in (
+        Path(r"C:\Users\mrmhr\OneDrive\Documents\Python\FX_NonLinear_Forecast_Direction"),
+        Path(__file__).resolve().parents[2] / "FX_NonLinear_Forecast_Direction",
     ):
-        return er.parent.parent
-    return er / "Mo_Dash"
+        key = str(p)
+        if key not in seen:
+            seen.add(key)
+            out.append(p)
+    return tuple(out)
 
 
-# Relative to Mo_Dash workspace root (see Mo_Dash/STRUCTURE.txt).
-_MO_DASH_FX_FORECAST_PARTS: tuple[str, ...] = (
-    "FX",
-    "FX forecasts",
-    "non-linear FX forecast - daily_binary_fx_forecast",
-)
-
-
-def _mo_dash_fx_forecast_xlsx(etf_root: Path) -> Path:
-    return _mo_dash_workspace_root(etf_root).joinpath(
-        *_MO_DASH_FX_FORECAST_PARTS,
-        "daily_binary_fx_forecast.xlsx",
-    )
+_FX_PROJECT_ROOT_DEFAULTS: tuple[Path, ...] = _fx_project_root_defaults()
 
 
 def _fx_forecast_xlsx_candidates() -> tuple[Path, ...]:
     """Prefer Mo_Dash FX output (new path, then legacy path), then workbook next to the FX project."""
-    mo_new = tuple(_mo_dash_fx_forecast_xlsx(er) for er in _ETF_PROJECT_ROOT_DEFAULTS)
+    mo_new = tuple(mo_dash_fx_forecast_xlsx(er) for er in _ETF_PROJECT_ROOT_DEFAULTS)
     mo_legacy = tuple(
-        _mo_dash_workspace_root(er)
+        mo_dash_workspace_root(er)
         / "FX"
         / "non-linear FX forecast - daily"
         / "daily_binary_fx_forecast.xlsx"
@@ -107,7 +105,6 @@ def _fx_forecast_xlsx_candidates() -> tuple[Path, ...]:
 DASHBOARD_COLUMNS: tuple[str, ...] = (
     "primary",
     "lead_days",
-    "target_return_basis",
     "recommendation",
     "position",
     "pred_class",
@@ -155,10 +152,10 @@ def _resolve_fx_project_root() -> Path | None:
 
 def _five_day_ohlc_all_pairs(etf_root: Path | None) -> pd.DataFrame:
     """Last 5 daily rows per FX pair from ``fx_data_collect`` raw parquets."""
-    if etf_root is None or not (etf_root / "fx_data_collect").is_dir():
+    if etf_root is None or not fx_data_collect_package_dir(etf_root).is_dir():
         return pd.DataFrame()
     try:
-        root_pkg = str(etf_root)
+        root_pkg = str(fx_data_collect_import_cwd(etf_root))
         if root_pkg not in sys.path:
             sys.path.insert(0, root_pkg)
         from fx_data_collect.config import FX_PAIRS  # noqa: PLC0415
@@ -193,7 +190,7 @@ def _five_day_ohlc_all_pairs(etf_root: Path | None) -> pd.DataFrame:
 
 def _resolve_etf_project_root() -> Path | None:
     for c in _ETF_PROJECT_ROOT_DEFAULTS:
-        if c.is_dir() and (c / "fx_data_collect").is_dir():
+        if c.is_dir() and (c / "project" / "main.py").is_file():
             return c
     return None
 
@@ -229,29 +226,25 @@ def _format_for_display(df: pd.DataFrame, min_accuracy: float) -> pd.DataFrame:
     return show.reset_index(drop=True)
 
 
-def _pair_basis_buy_sell_summary(df: pd.DataFrame) -> pd.DataFrame:
-    """One row per (primary, target_return_basis)."""
-    base_cols = ["primary", "target_return_basis", "n_buy", "n_sell"]
+def _pair_buy_sell_summary(df: pd.DataFrame) -> pd.DataFrame:
+    """One row per ``primary`` with buy / sell counts (close-basis only)."""
+    base_cols = ["primary", "n_buy", "n_sell"]
     if df.empty or "primary" not in df.columns:
         return pd.DataFrame(columns=base_cols)
     tmp = df.copy()
-    if "target_return_basis" in tmp.columns:
-        tmp["_basis"] = tmp["target_return_basis"].fillna("(unspecified)").astype(str)
-    else:
-        tmp["_basis"] = "(unspecified)"
     tmp["_side"] = classify_signal_side(tmp)
     sub = tmp[tmp["_side"].isin(["buy", "sell"])]
     if sub.empty:
         return pd.DataFrame(columns=base_cols)
-    ct = sub.groupby(["primary", "_basis"], sort=False)["_side"].value_counts().unstack(fill_value=0)
+    ct = sub.groupby(["primary"], sort=False)["_side"].value_counts().unstack(fill_value=0)
     for c in ("buy", "sell"):
         if c not in ct.columns:
             ct[c] = 0
     out = ct.rename(columns={"buy": "n_buy", "sell": "n_sell"})[["n_buy", "n_sell"]]
-    out = out.reset_index().rename(columns={"_basis": "target_return_basis"})
+    out = out.reset_index()
     out["n_buy"] = out["n_buy"].astype(int)
     out["n_sell"] = out["n_sell"].astype(int)
-    return out.sort_values(["primary", "target_return_basis"], kind="stable").reset_index(drop=True)
+    return out.sort_values(["primary"], kind="stable").reset_index(drop=True)
 
 
 def _fxcm_fc_secret_overrides() -> dict[str, object]:
@@ -379,7 +372,7 @@ def _kick_off_refresh(*, fx_root: Path, etf_root: Path | None, refresh_data: boo
         "--inject-live-quote",
     ]
     if etf_root is not None:
-        mo_xlsx = _mo_dash_fx_forecast_xlsx(etf_root)
+        mo_xlsx = mo_dash_fx_forecast_xlsx(etf_root)
         try:
             mo_xlsx.parent.mkdir(parents=True, exist_ok=True)
             daily_cmd.extend(["--out-xlsx", str(mo_xlsx)])
@@ -389,11 +382,11 @@ def _kick_off_refresh(*, fx_root: Path, etf_root: Path | None, refresh_data: boo
     # IMPORTANT: `fx_data_collect` and `fxnl` live in different repo roots.
     # We `cd` before each step so `python -m <module>` resolves correctly.
     ps_fx_root = _ps_single_quote(str(fx_root))
-    ps_etf_root = _ps_single_quote(str(etf_root)) if etf_root is not None else ""
 
+    ps_fc_cwd = _ps_single_quote(str(fx_data_collect_import_cwd(etf_root))) if etf_root is not None else ""
     segments: list[str] = []
     if pre_cmds and etf_root is not None:
-        segments.append(f"cd {ps_etf_root}")
+        segments.append(f"cd {ps_fc_cwd}")
         segments.extend(_cmd_to_powershell_invocation(cmd) for cmd in pre_cmds)
 
     segments.append(f"cd {ps_fx_root}")
@@ -473,7 +466,7 @@ def _refresh_pid_alive(pid: int) -> bool:
 def _render_fx_input_data_preview(etf_root: Path | None) -> None:
     """Show tails of ``fx_data_collect`` inputs merged into the FX repo panel."""
     if etf_root is None:
-        st.warning("ETF project root not found (expected a folder with `fx_data_collect`).")
+        st.warning("ETF project root not found, or Mo_Dash path ``FX/FX forecasts/fx_data_collect`` is missing.")
         return
     prev = load_fx_input_preview(etf_root, raw_tail=60, panel_tail=40)
     for e in prev.get("errors", []):
@@ -504,6 +497,38 @@ def _render_fx_input_data_preview(etf_root: Path | None) -> None:
                 st.dataframe(dfp, use_container_width=True)
 
 
+def _render_pair_likelihood_block(ccy_tbl: pd.DataFrame, signals: pd.DataFrame) -> None:
+    """Rank pairs by ``base_score − quote_score`` and show whether the signal agrees."""
+    rank = pair_likelihood_scores(ccy_tbl)
+    if rank.empty:
+        return
+    sig = signals.copy()
+    if "primary" in sig.columns:
+        sig["_side"] = classify_signal_side(sig)
+        sides_per_pair = (
+            sig[sig["_side"].isin(["buy", "sell"])]
+            .assign(side=lambda d: d["_side"].map({"buy": "long", "sell": "short"}))
+            .groupby("primary")["side"]
+            .agg(lambda s: s.value_counts().idxmax() if len(s) else "")
+            .to_dict()
+        )
+    else:
+        sides_per_pair = {}
+    rank["signal_side"] = rank["primary"].map(sides_per_pair).fillna("")
+    rank["match"] = [
+        bool(sig_s) and (sig_s == exp)
+        for sig_s, exp in zip(rank["signal_side"], rank["expected_side"])
+    ]
+    st.subheader("Pair likelihood ranking (currency-score derived)")
+    st.caption(
+        "For each pair **BASE/QUOTE**, ``pair_score = score(BASE) − score(QUOTE)`` from per-currency scores "
+        "above. **Lowest** (most negative) → strongest pair-level **short** bias; **highest** → strongest **long** "
+        "bias. ``signal_side`` is the majority direction across this pair's signal rows above (close-basis only). "
+        "``match = True`` highlights pairs where the model agrees with the currency-bias ranking."
+    )
+    st.dataframe(rank, hide_index=True, use_container_width=True)
+
+
 def _render_currency_block(sub: pd.DataFrame, *, title: str, basket_key_suffix: str) -> None:
     ccy_tbl = currency_leg_counts(sub)
     st.subheader(title)
@@ -518,6 +543,7 @@ def _render_currency_block(sub: pd.DataFrame, *, title: str, basket_key_suffix: 
     if "score" in disp_ccy.columns:
         disp_ccy["score"] = pd.to_numeric(disp_ccy["score"], errors="coerce").round(4)
     st.dataframe(disp_ccy, hide_index=True, use_container_width=True)
+    _render_pair_likelihood_block(ccy_tbl, sub)
     planned = plan_equal_bias_orders(ccy_tbl)
     if planned:
         st.caption(
@@ -584,6 +610,242 @@ def _render_currency_block(sub: pd.DataFrame, *, title: str, basket_key_suffix: 
         )
 
 
+def _daily_trade_check_path(fx_root: Path | None) -> Path | None:
+    """``daily_trade_check.json`` lives next to the workbook in the FX NL project."""
+    if fx_root is None or not fx_root.is_dir():
+        return None
+    return fx_root / "daily_trade_check.json"
+
+
+def _load_daily_trade_check(fx_root: Path | None) -> dict | None:
+    p = _daily_trade_check_path(fx_root)
+    if p is None or not p.is_file():
+        return None
+    try:
+        import json  # noqa: PLC0415
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _render_auto_trade_status(report: dict, fx_root: Path | None) -> None:
+    """Render the most recent ``daily_trade_check.json`` payload."""
+    finished = report.get("finished_at") or report.get("started_at") or "—"
+    fx_date = report.get("target_forecast_date") or "—"
+    dry = bool(report.get("dry_run", True))
+    cfg = report.get("config", {}) or {}
+    badge = "🟡 dry-run (auto-trade disabled)" if dry else "🟢 auto-trade enabled"
+    st.markdown(
+        f"**Last check:** {finished}  ·  **Forecast date:** {fx_date}  ·  {badge}  ·  "
+        f"top **{cfg.get('top_n', '?')}** · max open **{cfg.get('max_open', '?')}**"
+    )
+
+    errors = report.get("errors") or []
+    if errors:
+        for e in errors:
+            st.error(f"`{e.get('step', '?')}`: {e.get('error', '')}")
+
+    selected = report.get("selected_book") or []
+    if selected:
+        st.markdown("**Selected book** (top-N picked greedily by `|pair_score|`, no shared currencies):")
+        sel_df = pd.DataFrame(selected)
+        keep = [c for c in ("selection_rank", "primary", "side", "expected_side", "pair_score", "abs_score", "ranking_rank", "reason") if c in sel_df.columns]
+        st.dataframe(sel_df[keep], hide_index=True, use_container_width=True)
+    else:
+        st.caption("Selected book is empty (no qualifying signals today).")
+
+    skips = report.get("overlap_skips") or []
+    if skips:
+        with st.popover(f"⚠ Passed over {len(skips)} candidate(s) due to currency overlap"):
+            st.dataframe(pd.DataFrame(skips), hide_index=True, use_container_width=True)
+
+    decisions = report.get("decisions") or []
+    if decisions:
+        st.markdown("**Open positions on FXCM** vs today's selected book:")
+        df = pd.DataFrame(decisions)
+        for col in ("primary", "side", "lots", "decision", "selection_rank", "today_side", "pair_score", "reason", "gross_pl"):
+            if col not in df.columns:
+                df[col] = pd.NA
+        df = df[["primary", "side", "lots", "decision", "selection_rank", "today_side", "pair_score", "reason", "gross_pl"]]
+        st.dataframe(df, hide_index=True, use_container_width=True)
+    else:
+        st.caption("No open positions on FXCM at the time of the last check.")
+
+    planned = report.get("planned_opens") or []
+    if planned:
+        st.markdown("**Planned new opens (selected book slots not yet on):**")
+        st.dataframe(pd.DataFrame(planned), hide_index=True, use_container_width=True)
+
+    actions = report.get("actions") or []
+    if actions:
+        st.markdown("**Actions executed in the last pass:**")
+        st.dataframe(pd.DataFrame(actions), hide_index=True, use_container_width=True)
+
+
+def _render_auto_trade_history(fx_root: Path | None, max_rows: int = 20) -> None:
+    """Show the last few passes from ``daily_trade_check.history.jsonl``."""
+    if fx_root is None or not fx_root.is_dir():
+        return
+    p = fx_root / "daily_trade_check.history.jsonl"
+    if not p.is_file():
+        st.caption("No history yet (this is the first run).")
+        return
+    try:
+        import json  # noqa: PLC0415
+        lines = p.read_text(encoding="utf-8").splitlines()
+    except OSError as e:
+        st.warning(f"Could not read history file: {e}")
+        return
+
+    rows: list[dict] = []
+    for line in lines[-int(max_rows):]:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            r = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        sel = r.get("selected_book") or []
+        sel_str = ", ".join(f"#{s.get('selection_rank', '?')} {s.get('primary', '')} {s.get('side', '')}" for s in sel)
+        actions = r.get("actions") or []
+        kinds = {a.get("kind", "?") for a in actions}
+        rows.append(
+            {
+                "finished_at": r.get("finished_at"),
+                "forecast_date": r.get("target_forecast_date"),
+                "enabled": (r.get("config") or {}).get("enabled"),
+                "selected_book": sel_str,
+                "n_open_positions": len(r.get("open_positions") or []),
+                "actions_summary": ", ".join(sorted(kinds)) if kinds else "(none)",
+                "errors": len(r.get("errors") or []),
+            }
+        )
+    if not rows:
+        st.caption("No usable history records yet.")
+        return
+    st.dataframe(pd.DataFrame(rows[::-1]), hide_index=True, use_container_width=True)
+    st.caption(
+        f"History file: `{p}` "
+        f"(append-only JSONL — also see `daily_trade_check.history.log` for a human-readable summary of every pass)."
+    )
+
+
+def _render_auto_trade_config_form() -> None:
+    """Form to edit ``auto_trade.config.json``. Streamlit re-runs on save."""
+    cfg = load_config()
+    with st.form("auto_trade_config_form", clear_on_submit=False):
+        c1, c2, c3 = st.columns([1.4, 1.0, 1.0])
+        enabled = c1.toggle(
+            "Enable automated trading at 5:15 PM NY",
+            value=bool(cfg.enabled),
+            help=(
+                "When ON, the daily check (part of the 5:15 PM scheduled task) selects the "
+                "top-N pairs (greedy, currency-disjoint), KEEPS positions already in that "
+                "selected book (no churn), CLOSES positions that aren't, and OPENS the missing "
+                "slots. When OFF, the dashboard still shows the analysis but nothing trades."
+            ),
+        )
+        top_n = c2.number_input("Top-N pairs", min_value=1, max_value=10, value=int(cfg.top_n), step=1, help="Size of the selected book each day (default 2).")
+        max_open = c3.number_input("Max open", min_value=1, max_value=10, value=int(cfg.max_open), step=1, help="Hard cap on total simultaneously open auto-trades.")
+
+        c4, c5, c6 = st.columns(3)
+        pct = c4.number_input("% equity / trade", min_value=0.1, max_value=100.0, value=float(cfg.pct_equity_per_trade), step=0.1)
+        lev = c5.number_input("Leverage", min_value=0.1, max_value=500.0, value=float(cfg.leverage), step=0.5)
+        stop = c6.number_input("Stop %", min_value=0.01, max_value=50.0, value=float(cfg.stop_pct), step=0.05)
+
+        skip_v = st.checkbox(
+            "Skip pairs that are not price-subscribed on FXCM (status ≠ 'T')",
+            value=bool(cfg.skip_unsubscribed),
+            help="If a top pair like AUD/USD shows subscription_status='V' on your account, skip it and surface a note (open it once in Trading Station to enable trading).",
+        )
+
+        submitted = st.form_submit_button("💾 Save auto-trade settings", type="primary")
+        if submitted:
+            new_cfg = AutoTradeConfig(
+                enabled=bool(enabled),
+                top_n=int(top_n),
+                pct_equity_per_trade=float(pct),
+                leverage=float(lev),
+                stop_pct=float(stop),
+                max_open=int(max_open),
+                skip_unsubscribed=bool(skip_v),
+            )
+            saved = save_config(new_cfg)
+            st.success(f"Saved → `{saved}`. The next 5:15 PM run will use these settings.")
+
+
+def _render_auto_trade_panel(*, etf_root: Path | None, fx_root: Path | None) -> None:
+    """Show today's auto-trade pass + the configuration form, both in an expander."""
+    cfg = load_config()
+    enabled = bool(cfg.enabled)
+    title = "🤖 Auto-trade check (daily)" + ("  —  **enabled**" if enabled else "  —  disabled (analysis only)")
+    with st.expander(title, expanded=False):
+        st.caption(
+            f"Config: `{default_config_path()}` · "
+            "The 5:15 PM scheduled task runs the analysis and writes the report. Trades only "
+            "execute when **Enable automated trading** is on. Click **Run check now** to refresh "
+            "this section between scheduled runs."
+        )
+
+        report = _load_daily_trade_check(fx_root)
+        if report is None:
+            st.info(
+                "No daily check has run yet (or the workbook hasn't been refreshed). "
+                "Use the **↻ Refresh forecasts now** button above to build the workbook and run "
+                "the first auto-trade check pass."
+            )
+        else:
+            _render_auto_trade_status(report, fx_root)
+
+        st.divider()
+        c1, c2 = st.columns([1.4, 4])
+        run_now = c1.button(
+            "▶ Run check now",
+            help="Runs scripts/daily_trade_check.py once with the current config. "
+                 "Reads the existing workbook (does NOT refit models) and updates this report.",
+        )
+        if run_now:
+            if etf_root is None:
+                st.error("Cannot find the ETF Forecaster project root — set FXNL_PROJECT_ROOT or relaunch via the Mo_Dash launcher.")
+            else:
+                ok, output = _run_daily_check_now(etf_root)
+                if ok:
+                    st.success("Daily check completed; report refreshed.")
+                else:
+                    st.error("Daily check failed — see output below.")
+                with c2:
+                    st.code(output[-3000:] if output else "(no output)", language="text")
+                st.rerun()
+
+        st.markdown("##### Settings")
+        _render_auto_trade_config_form()
+
+        st.markdown("##### History (last 20 passes)")
+        _render_auto_trade_history(fx_root, max_rows=20)
+
+
+def _run_daily_check_now(etf_root: Path) -> tuple[bool, str]:
+    """Foreground subprocess invocation of ``scripts/daily_trade_check.py``."""
+    venv_py = etf_root / "project" / ".venv" / "Scripts" / "python.exe"
+    py = str(venv_py) if venv_py.is_file() else (sys.executable or "py")
+    script = etf_root / "project" / "scripts" / "daily_trade_check.py"
+    if not script.is_file():
+        return False, f"Missing script: {script}"
+    try:
+        proc = subprocess.run(
+            [py, str(script)],
+            cwd=str(etf_root / "project"),
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+        out = (proc.stdout or "") + ("\n" + proc.stderr if proc.stderr else "")
+        return proc.returncode == 0, out
+    except Exception as e:  # noqa: BLE001
+        return False, f"Failed to launch daily check: {e}"
+
+
 def render_fx_forecast_tab(default_email: str) -> None:
     """Render the FX direction forecasts page."""
     st.subheader("FX direction forecasts (daily)")
@@ -624,8 +886,9 @@ def render_fx_forecast_tab(default_email: str) -> None:
     if refresh_clicked:
         if fx_root is None:
             st.error(
-                "Cannot find the FX_NonLinear_Forecast_Direction project. "
-                "Set `FXNL_PROJECT_ROOT` env var or place it next to ETF Forecaster."
+                "Cannot find the FX non-linear project under Mo_Dash "
+                "(expected …/Mo_Dash/FX/FX forecasts/non-linear FX forecast - daily_binary_fx_forecast). "
+                "Set `FXNL_PROJECT_ROOT` env var if it lives elsewhere."
             )
         else:
             pid = _kick_off_refresh(
@@ -679,7 +942,7 @@ def render_fx_forecast_tab(default_email: str) -> None:
             "No FX forecast workbook found yet. Click **↻ Refresh forecasts now** to build one, "
             "or run the daily report manually:\n\n"
             "```powershell\n"
-            "cd C:\\Users\\mrmhr\\OneDrive\\Documents\\Python\\FX_NonLinear_Forecast_Direction\n"
+            "cd \"C:\\Users\\mrmhr\\OneDrive\\Documents\\Python\\Mo_Dash\\FX\\FX forecasts\\non-linear FX forecast - daily_binary_fx_forecast\"\n"
             "py -3 -m fxnl.daily_binary_forecast_report --align-to-next-bar --inject-live-quote\n"
             "```"
         )
@@ -693,6 +956,8 @@ def render_fx_forecast_tab(default_email: str) -> None:
 
     file_mtime = pd.Timestamp(xlsx_path.stat().st_mtime, unit="s").tz_localize("UTC").tz_convert("America/New_York")
     st.caption(f"Source: `{xlsx_path}`  ·  generated {file_mtime:%Y-%m-%d %H:%M %Z}")
+
+    _render_auto_trade_panel(etf_root=etf_root, fx_root=fx_root)
 
     ohlc5 = _five_day_ohlc_all_pairs(etf_root)
     if not ohlc5.empty:
@@ -711,23 +976,15 @@ def render_fx_forecast_tab(default_email: str) -> None:
                 "target panel_end + N bars (not 'tomorrow'). Click **↻ Refresh forecasts now**."
             )
 
-    c1, c2, c3 = st.columns([1, 1, 2])
+    c1, c2 = st.columns([1, 1])
     min_accuracy = c1.slider("Min avg OOS accuracy", 0.50, 0.95, 0.60, 0.01)
     only_strong = c2.checkbox("Only Strong (≥65%)", value=False)
-    target_basis = c3.multiselect(
-        "Target basis",
-        options=sorted(signals["target_return_basis"].dropna().unique().tolist())
-        if "target_return_basis" in signals.columns
-        else [],
-        default=None,
-        placeholder="All",
-    )
 
     show = _format_for_display(signals, min_accuracy=min_accuracy)
     if only_strong and "avg_oos_accuracy" in show.columns:
         show = show[show["avg_oos_accuracy"] >= 0.65]
-    if target_basis and "target_return_basis" in show.columns:
-        show = show[show["target_return_basis"].isin(target_basis)]
+    if "target_return_basis" in show.columns:
+        show = show[show["target_return_basis"].astype(str).str.lower() == "close"]
 
     if show.empty:
         st.info("No signals match the current filters.")
@@ -754,17 +1011,23 @@ def render_fx_forecast_tab(default_email: str) -> None:
                 )
 
     if meta is not None and not meta.empty and bool(meta.iloc[0].get("align_to_next_bar", False)):
+        meta0 = meta.iloc[0]
+        thru = meta0.get("fx_data_through_date") or meta0.get("data_through_date")
+        thru_s = f" Data through **{thru}** (NY 5 PM rule)." if thru and str(thru) not in ("", "nan") else ""
         st.caption(
-            "`target_forecast_date` is the **next** session the row is betting on. `latest_feature_date` is the last bar "
-            "in the feature panel. `input_feature_date` **lags** the panel end when `lead_days` > 1."
+            "`target_forecast_date` is the **next** session after the last feature bar allowed by the "
+            "**5:00 PM America/New_York** cutoff (before 5 PM → yesterday's close → forecast **today**; "
+            "after 5 PM → today's close → forecast **next business day**)."
+            f"{thru_s} `latest_feature_date` is the last bar in the panel. "
+            "`input_feature_date` **lags** the panel end when `lead_days` > 1."
         )
 
     st.dataframe(show, hide_index=True, use_container_width=True)
 
     _render_currency_block(show, title="Currency exposure (from pair signals)", basket_key_suffix="single")
 
-    summary = _pair_basis_buy_sell_summary(show)
-    st.subheader("Summary by pair and target basis")
+    summary = _pair_buy_sell_summary(show)
+    st.subheader("Summary by pair")
     st.caption(
         "Counts of **buy** vs **sell** for the filtered rows above. "
         "Side is taken from **position**, then **recommendation**, then numeric **pred_class** (1→buy, 0→sell), "
@@ -871,10 +1134,8 @@ def render_fx_forecast_tab(default_email: str) -> None:
 
         for idx, srow in summary.iterrows():
             primary = str(srow["primary"])
-            basis = str(srow["target_return_basis"])
-            r0, r1, r2, r3, r4, r5 = st.columns([2.0, 1.2, 0.55, 0.55, 0.65, 0.65])
+            r0, r2, r3, r4, r5 = st.columns([2.6, 0.55, 0.55, 0.65, 0.65])
             r0.markdown(f"**{primary}**")
-            r1.caption(basis)
             r2.write(f"{int(srow['n_buy'])}B")
             r3.write(f"{int(srow['n_sell'])}S")
             sym_lbl = fc_pair_display(primary)

@@ -9,11 +9,13 @@ from typing import Any
 
 import pandas as pd
 
+from utils.mo_dash_layout import fx_data_collect_import_cwd, fx_data_collect_package_dir
+
 
 def _ensure_fx_collect_path(etf_root: Path | None) -> bool:
-    if etf_root is None or not (etf_root / "fx_data_collect").is_dir():
+    if etf_root is None or not fx_data_collect_package_dir(etf_root).is_dir():
         return False
-    root_pkg = str(etf_root)
+    root_pkg = str(fx_data_collect_import_cwd(etf_root))
     if root_pkg not in sys.path:
         sys.path.insert(0, root_pkg)
     return True
@@ -28,7 +30,7 @@ def load_fx_input_preview(
     """Return dataframes / messages for everything merged into the FX repo panel."""
     out: dict[str, Any] = {"errors": []}
     if not _ensure_fx_collect_path(etf_root):
-        out["errors"].append("ETF project root or fx_data_collect not found.")
+        out["errors"].append("Mo_Dash FX data repo not found (expected …/FX/FX forecasts/fx_data_collect). Set MO_DASH_ROOT if needed.")
         return out
     try:
         from fx_data_collect.config import FX_PAIRS  # noqa: PLC0415

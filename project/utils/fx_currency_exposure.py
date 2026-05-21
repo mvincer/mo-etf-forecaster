@@ -123,6 +123,69 @@ def express_currency_bias_as_pair(*, currency: str, want_long_ccy: bool) -> tupl
     return None
 
 
+def pair_likelihood_scores(
+    currency_table: pd.DataFrame,
+    *,
+    pair_universe: tuple[str, ...] = _PAIR_UNIVERSE,
+) -> pd.DataFrame:
+    """Rank pairs by ``base_score − quote_score`` from per-currency scores.
+
+    Currency ``score`` is the bias index from :func:`currency_leg_counts` —
+    ``(n_long − n_short) / n_total`` per currency across the filtered signals.
+
+    For each pair **BASE/QUOTE**:
+
+    - ``pair_score = score(BASE) − score(QUOTE)``  (in ``[−2, +2]`` if both scores defined).
+    - **Most negative** → strongest pair-level **short** bias.
+    - **Most positive** → strongest pair-level **long** bias.
+
+    Currencies missing from ``currency_table`` are treated as ``score = 0`` (neutral)
+    so the universe is always fully ranked.
+
+    Returns columns: ``primary``, ``base``, ``quote``, ``base_score``, ``quote_score``,
+    ``pair_score``, ``expected_side`` (``long`` / ``short`` / ``neutral``).
+    """
+    if currency_table is None or currency_table.empty:
+        score_by_ccy: dict[str, float] = {}
+    else:
+        score_by_ccy = {
+            str(r["currency"]).strip().upper(): float(r["score"])
+            for _, r in currency_table.iterrows()
+            if pd.notna(r.get("score"))
+        }
+
+    rows: list[dict[str, object]] = []
+    for primary in pair_universe:
+        pq = parse_fx_pair(primary)
+        if pq is None:
+            continue
+        base, quote = pq
+        bs = score_by_ccy.get(base, 0.0)
+        qs = score_by_ccy.get(quote, 0.0)
+        ps = bs - qs
+        if ps > 1e-9:
+            side = "long"
+        elif ps < -1e-9:
+            side = "short"
+        else:
+            side = "neutral"
+        rows.append(
+            {
+                "primary": primary,
+                "base": base,
+                "quote": quote,
+                "base_score": round(bs, 4),
+                "quote_score": round(qs, 4),
+                "pair_score": round(ps, 4),
+                "expected_side": side,
+            },
+        )
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+    return out.sort_values("pair_score", ascending=True, kind="stable").reset_index(drop=True)
+
+
 @dataclass(frozen=True)
 class PlannedOrder:
     primary: str

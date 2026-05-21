@@ -1,68 +1,52 @@
-"""Resolve Mo_Dash workspace paths (FX workbook, ``fx_data_collect`` package, etc.)."""
+"""Backward-compat shim. Real implementation lives in ``mo_dash_common.layout``.
+
+Why this exists:
+
+* Inside the Mo_Dash monorepo, ``mo_dash_common/`` sits at the workspace root
+  (``Mo_Dash/mo_dash_common/``). This shim walks up from its own location until
+  it finds that package, then adds the parent directory to ``sys.path`` so
+  ``from mo_dash_common import layout`` resolves.
+* When this folder is published as a standalone sub-repo (e.g.
+  ``mo-etf-forecaster``) by ``scripts/publish_subtrees.ps1``, the publisher
+  vendors ``mo_dash_common/`` at the sub-repo root. The same walk-up logic
+  finds it there too, so existing ``from utils.mo_dash_layout import …``
+  imports keep working without change.
+
+Prefer ``from mo_dash_common import layout`` (or
+``from mo_dash_common.layout import …``) in new code.
+"""
 
 from __future__ import annotations
 
-import os
+import sys
 from pathlib import Path
 
-# Under workspace root (see Mo_Dash/STRUCTURE.txt).
-_MO_DASH_FX_FORECAST_PARTS: tuple[str, ...] = (
-    "FX",
-    "FX forecasts",
-    "non-linear FX forecast - daily_binary_fx_forecast",
+
+def _bootstrap_mo_dash_common_on_path() -> None:
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        candidate = parent / "mo_dash_common"
+        if (candidate / "__init__.py").is_file():
+            parent_str = str(parent)
+            if parent_str not in sys.path:
+                sys.path.insert(0, parent_str)
+            return
+
+
+_bootstrap_mo_dash_common_on_path()
+
+from mo_dash_common.layout import (  # noqa: E402  (import after sys.path setup)
+    fx_data_collect_import_cwd,
+    fx_data_collect_package_dir,
+    fx_nl_project_root,
+    mo_dash_fx_forecast_xlsx,
+    mo_dash_workspace_root,
 )
 
-
-def mo_dash_workspace_root(etf_root: Path) -> Path:
-    """Folder that contains ``FX/``, ``ETF/``, ``Dashboard/`` (not the ETF app git root).
-
-    Order:
-
-    1. ``MO_DASH_ROOT`` env.
-    2. Repo at ``…/Mo_Dash/ETF/ETF Forecaster`` → ``…/Mo_Dash``.
-    3. Sibling ``<parent>/Mo_Dash`` when ``etf_root`` is ``…/ETF Forecaster`` (classic layout).
-    4. Legacy: ``<etf_root>/Mo_Dash``.
-    """
-    env = (os.environ.get("MO_DASH_ROOT") or "").strip()
-    if env:
-        return Path(env).expanduser().resolve()
-    er = etf_root.resolve()
-    if (
-        er.name.lower() == "etf forecaster"
-        and er.parent.name.lower() == "etf"
-        and er.parent.parent.name.lower() == "mo_dash"
-    ):
-        return er.parent.parent
-    sib = er.parent / "Mo_Dash"
-    if sib.is_dir() and (sib / "FX").is_dir():
-        return sib.resolve()
-    return er / "Mo_Dash"
-
-
-def fx_data_collect_package_dir(etf_root: Path) -> Path:
-    """Directory that **contains** the ``fx_data_collect`` package (…/fx_data_collect/__init__.py)."""
-    return mo_dash_workspace_root(etf_root) / "FX" / "FX forecasts" / "fx_data_collect"
-
-
-def fx_data_collect_import_cwd(etf_root: Path) -> Path:
-    """Working directory for ``python -m fx_data_collect.*`` (parent of the package folder)."""
-    return fx_data_collect_package_dir(etf_root).parent
-
-
-def mo_dash_fx_forecast_xlsx(etf_root: Path) -> Path:
-    return mo_dash_workspace_root(etf_root).joinpath(
-        *_MO_DASH_FX_FORECAST_PARTS,
-        "daily_binary_fx_forecast.xlsx",
-    )
-
-
-def fx_nl_project_root(etf_root: Path) -> Path:
-    """Directory of the FX non-linear project (contains ``fxnl/`` and ``daily_binary_fx_forecast.xlsx``).
-
-    Inside Mo_Dash this is ``…/Mo_Dash/FX/FX forecasts/non-linear FX forecast - daily_binary_fx_forecast/``.
-    Set ``FXNL_PROJECT_ROOT`` to override.
-    """
-    env = (os.environ.get("FXNL_PROJECT_ROOT") or os.environ.get("FX_FORECAST_PROJECT") or "").strip()
-    if env:
-        return Path(env).expanduser().resolve()
-    return mo_dash_workspace_root(etf_root).joinpath(*_MO_DASH_FX_FORECAST_PARTS)
+__all__ = [
+    "mo_dash_workspace_root",
+    "fx_data_collect_package_dir",
+    "fx_data_collect_import_cwd",
+    "mo_dash_fx_forecast_xlsx",
+    "fx_nl_project_root",
+]

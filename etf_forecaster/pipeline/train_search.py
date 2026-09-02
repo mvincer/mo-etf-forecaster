@@ -17,9 +17,12 @@ import argparse
 import json
 import logging
 import time
+from pathlib import Path
 
+import joblib
 import numpy as np
 import pandas as pd
+from joblib import Parallel, delayed
 
 from etf_forecaster import store
 from etf_forecaster.config import all_tickers, search_cfg, ticker_group, universe_cfg
@@ -236,6 +239,59 @@ def magnitude_quantiles(ticker: str, horizon: int, ds: Dataset, config: dict,
 
 # ------------------------------------------------------------------ driver
 
+_REPO = Path(__file__).resolve().parents[2]
+
+
+def _cell_cache_dir(fast: bool) -> Path:
+    d = _REPO / "runs" / ("fast" if fast else "full")
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _safe_name(s: str) -> str:
+    return s.replace("^", "_").replace(".", "_").replace(" ", "_")
+
+
+def _cached(path: Path, compute):
+    """Load a pickled cell result if present, else compute and persist it.
+
+    Cells are cached so a crashed run (e.g. a loky worker killed by the OS) can resume
+    without repeating hours of finished work."""
+    if path.is_file():
+        try:
+            return joblib.load(path)
+        except Exception:  # noqa: BLE001 - corrupt cache, recompute
+            path.unlink(missing_ok=True)
+    res = compute()
+    if res is not None:
+        joblib.dump(res, path)
+    return res
+
+
+def _run_cells(fn, arg_tuples: list[tuple], jobs: int) -> list:
+    """Parallel map with per-chunk sequential fallback.
+
+    joblib aborts the whole batch when a worker process dies (TerminatedWorkerError),
+    so we run in chunks: a failed chunk is retried sequentially, and per-cell caching
+    means already-finished cells inside the chunk are not recomputed."""
+    outs: list = []
+    chunk = max(jobs, 1) * 2
+    for i in range(0, len(arg_tuples), chunk):
+        part = arg_tuples[i:i + chunk]
+        try:
+            outs.extend(Parallel(n_jobs=jobs, verbose=5)(delayed(fn)(*a) for a in part))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("parallel chunk %d-%d failed (%s); retrying sequentially",
+                        i, i + len(part), exc)
+            for a in part:
+                try:
+                    outs.append(fn(*a))
+                except Exception:  # noqa: BLE001
+                    log.exception("cell %s failed in sequential retry", a[:2])
+                    outs.append(None)
+    return outs
+
+
 def _one_group_cell(group: str, members: list[str], horizon: int, cfg: dict,
                     fast: bool, jobs_inner: int) -> dict | None:
     data = {}
@@ -273,10 +329,21 @@ def _one_ticker_cell(ticker: str, horizon: int, group_result: dict, cfg: dict,
     return preds, meta, quants
 
 
-def run(*, fast: bool = True, tickers: list[str] | None = None,
-        horizons: list[int] | None = None, jobs: int = 8) -> None:
-    from joblib import Parallel, delayed
+def _group_cell_cached(group: str, members: list[str], horizon: int, cfg: dict,
+                       fast: bool, jobs_inner: int, cache: Path) -> dict | None:
+    path = cache / f"group_{_safe_name(group)}_h{horizon}.pkl"
+    return _cached(path, lambda: _one_group_cell(group, members, horizon, cfg, fast, jobs_inner))
 
+
+def _ticker_cell_cached(ticker: str, horizon: int, group_result: dict, cfg: dict,
+                        fast: bool, jobs_inner: int, cache: Path):
+    path = cache / f"cell_{_safe_name(ticker)}_h{horizon}.pkl"
+    return _cached(path, lambda: _one_ticker_cell(ticker, horizon, group_result, cfg,
+                                                  fast, jobs_inner))
+
+
+def run(*, fast: bool = True, tickers: list[str] | None = None,
+        horizons: list[int] | None = None, jobs: int = 8, resume: bool = False) -> None:
     cfg = search_cfg()
     horizons = horizons or cfg["horizons"]
     fastcfg = cfg["fast"]
@@ -288,13 +355,19 @@ def run(*, fast: bool = True, tickers: list[str] | None = None,
     tickers = tickers or all_tickers()
     jobs_inner = max(2, 32 // jobs)
 
+    cache = _cell_cache_dir(fast)
+    if not resume:
+        for f in cache.glob("*.pkl"):
+            f.unlink(missing_ok=True)
+
     # ---- stages 1-4 at group level
     t0 = time.time()
     cells = [(g, m, h) for g, m in groups.items() for h in screened
              if any(t in tickers for t in m)]
-    log.info("ablation: %d group cells (jobs=%d)", len(cells), jobs)
-    results = Parallel(n_jobs=jobs, verbose=5)(
-        delayed(_one_group_cell)(g, m, h, cfg, fast, jobs_inner) for g, m, h in cells)
+    log.info("ablation: %d group cells (jobs=%d, resume=%s)", len(cells), jobs, resume)
+    results = _run_cells(_group_cell_cached,
+                         [(g, m, h, cfg, fast, jobs_inner, cache) for g, m, h in cells],
+                         jobs)
     group_results: dict[tuple[str, int], dict] = {}
     all_records: list[dict] = []
     for (g, m, h), res in zip(cells, results):
@@ -320,8 +393,9 @@ def run(*, fast: bool = True, tickers: list[str] | None = None,
             if (g, h) in group_results:
                 todo.append((t, h, group_results[(g, h)]))
     log.info("outer walk-forward: %d ticker cells", len(todo))
-    outs = Parallel(n_jobs=jobs, verbose=5)(
-        delayed(_one_ticker_cell)(t, h, gr, cfg, fast, jobs_inner) for t, h, gr in todo)
+    outs = _run_cells(_ticker_cell_cached,
+                      [(t, h, gr, cfg, fast, jobs_inner, cache) for t, h, gr in todo],
+                      jobs)
 
     champions: dict = store.read_champions()
     frames: list[pd.DataFrame] = []
@@ -348,12 +422,14 @@ def main() -> None:
     ap.add_argument("--tickers", default="")
     ap.add_argument("--horizons", default="")
     ap.add_argument("--jobs", type=int, default=8)
+    ap.add_argument("--resume", action="store_true",
+                    help="reuse cached cells from a previous (crashed) run")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     run(fast=not args.full,
         tickers=[t.strip() for t in args.tickers.split(",") if t.strip()] or None,
         horizons=[int(h) for h in args.horizons.split(",") if h.strip()] or None,
-        jobs=args.jobs)
+        jobs=args.jobs, resume=args.resume)
 
 
 if __name__ == "__main__":

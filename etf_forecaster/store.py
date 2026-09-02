@@ -134,6 +134,11 @@ def append_ablation(records: list[dict]) -> None:
     new = pd.DataFrame(records)
     old = read(ABLATION)
     merged = pd.concat([old, new], ignore_index=True) if old is not None else new
+    # resumed runs re-append cached cells; keep the latest evaluation of each cell
+    key = [c for c in ("group", "horizon", "stage", "blocks", "model", "params", "window")
+           if c in merged.columns]
+    if key:
+        merged = merged.drop_duplicates(subset=key, keep="last").reset_index(drop=True)
     _write(merged, ABLATION)
 
 

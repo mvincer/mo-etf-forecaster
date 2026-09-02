@@ -4,9 +4,14 @@ that tolerates NaNs (natively or via an imputing pipeline)."""
 from __future__ import annotations
 
 import logging
+import warnings
 from typing import Any
 
 import numpy as np
+
+# These fire thousands of times inside walk-forward loops and drown real errors in logs.
+warnings.filterwarnings("ignore", message="X does not have valid feature names")
+warnings.filterwarnings("ignore", category=FutureWarning, module="sklearn")
 
 log = logging.getLogger(__name__)
 

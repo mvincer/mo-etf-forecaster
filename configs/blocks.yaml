@@ -1,0 +1,17 @@
+# Feature blocks: the unit the ablation grid search includes/excludes.
+# Every feature column carries exactly one of these prefixes.
+# PRICE is the always-on base; the other 11 are toggleable.
+
+blocks:
+  PRICE:      {prefix: px_,   toggleable: false, desc: "returns, gaps, range-vol estimators, last-X candles"}
+  TECH:       {prefix: tech_, toggleable: true,  desc: "top-20 technical indicators"}
+  PATTERN_D1: {prefix: patd_, toggleable: true,  desc: "chart patterns on daily bars"}
+  PATTERN_HTF: {prefix: path_, toggleable: true, desc: "chart patterns on weekly/monthly bars + agreement"}
+  REGIME:     {prefix: reg_,  toggleable: true,  desc: "trend/range state, market structure, Markov regime"}
+  VOLOPT:     {prefix: vol_,  toggleable: true,  desc: "VIX complex, term slopes, IBKR IV, HAR/GARCH"}
+  SKEW:       {prefix: skw_,  toggleable: true,  desc: "chain-derived rr25/bf25/term/GEX (short history)"}
+  MACRO_FAST: {prefix: mf_,   toggleable: true,  desc: "daily FRED: yields, curve, credit, dollar, oil"}
+  MACRO_SLOW: {prefix: ms_,   toggleable: true,  desc: "vintage-aligned CPI, INDPRO, UNRATE, claims, M2, ..."}
+  EARNINGS:   {prefix: earn_, toggleable: true,  desc: "Shiller earnings growth, CAPE, Fed-model spread"}
+  CROSS:      {prefix: x_,    toggleable: true,  desc: "session-aligned cross-asset lead-lag and ranks"}
+  SEASON:     {prefix: cal_,  toggleable: true,  desc: "day-of-week, turn-of-month, OPEX, FOMC, releases"}

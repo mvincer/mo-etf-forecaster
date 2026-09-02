@@ -1,0 +1,22 @@
+# Data lake and generated artifacts stay on disk, out of git
+data/
+runs/
+logs/
+*.log
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+.ipynb_checkpoints/
+
+# Secrets
+.env
+
+# OS
+Thumbs.db
+.DS_Store

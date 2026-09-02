@@ -1,0 +1,70 @@
+# The forecast universe. 40 unique tickers.
+#
+# session: us | ca | kr  -> controls as-of alignment of cross-asset features.
+#   close_order: kr(1) closes ~02:00 ET, us/ca(2) close 16:00 ET. A source ticker whose
+#   close_order is <= the target's may contribute same-day features; otherwise it is lagged 1 day.
+# target_type: etf | index | vol  -> vol targets are modelled on log levels (mean-reverting).
+# chain: include in the daily option-chain snapshot (US-listed, liquid options only).
+# ibkr_iv: request OPTION_IMPLIED_VOLATILITY / HISTORICAL_VOLATILITY bars from IBKR.
+
+sessions:
+  us: {close_order: 2}
+  ca: {close_order: 2}
+  kr: {close_order: 1}
+
+groups:
+  broad:   [SPY, QQQ, IWM, MDY, DIA]
+  sector:  [XLK, XLF, XLE, XLB, XLI, XLV, XLY, XLP, XLC, XLU, XLRE]
+  vol:     ["^VIX", "^VVIX", VIXY]
+  semis:   [SOXX, SMH, MU, "000660.KS", "005930.KS"]
+  dm:      [EWG, EWQ, EWJ, EWU, EWC]
+  em:      [EEM, FXI, EWY, EWT, INDA, EWZ, EWW]
+  canada:  ["^GSPTSE", XFN.TO, XEG.TO, XMA.TO]
+
+tickers:
+  SPY:        {name: "S&P 500",              session: us, target_type: etf,   chain: true,  ibkr_iv: true}
+  QQQ:        {name: "Nasdaq 100",           session: us, target_type: etf,   chain: true,  ibkr_iv: true}
+  IWM:        {name: "Russell 2000",         session: us, target_type: etf,   chain: true,  ibkr_iv: true}
+  MDY:        {name: "S&P MidCap 400",       session: us, target_type: etf,   chain: true,  ibkr_iv: true}
+  DIA:        {name: "Dow Jones Industrial", session: us, target_type: etf,   chain: true,  ibkr_iv: true}
+  XLK:        {name: "Technology",           session: us, target_type: etf,   chain: true,  ibkr_iv: true}
+  XLF:        {name: "Financials",           session: us, target_type: etf,   chain: true,  ibkr_iv: true}
+  XLE:        {name: "Energy",               session: us, target_type: etf,   chain: true,  ibkr_iv: true}
+  XLB:        {name: "Materials",            session: us, target_type: etf,   chain: true,  ibkr_iv: true}
+  XLI:        {name: "Industrials",          session: us, target_type: etf,   chain: true,  ibkr_iv: true}
+  XLV:        {name: "Health Care",          session: us, target_type: etf,   chain: true,  ibkr_iv: true}
+  XLY:        {name: "Consumer Discretionary", session: us, target_type: etf, chain: true,  ibkr_iv: true}
+  XLP:        {name: "Consumer Staples",     session: us, target_type: etf,   chain: true,  ibkr_iv: true}
+  XLC:        {name: "Communication Svcs",   session: us, target_type: etf,   chain: true,  ibkr_iv: true}
+  XLU:        {name: "Utilities",            session: us, target_type: etf,   chain: true,  ibkr_iv: true}
+  XLRE:       {name: "Real Estate",          session: us, target_type: etf,   chain: true,  ibkr_iv: true}
+  "^VIX":     {name: "VIX",                  session: us, target_type: vol,   chain: false, ibkr_iv: false}
+  "^VVIX":    {name: "VVIX",                 session: us, target_type: vol,   chain: false, ibkr_iv: false}
+  VIXY:       {name: "VIX ST Futures ETF",   session: us, target_type: vol,   chain: true,  ibkr_iv: true}
+  SOXX:       {name: "Semiconductor (iShares)", session: us, target_type: etf, chain: true, ibkr_iv: true}
+  SMH:        {name: "Semiconductor (VanEck)",  session: us, target_type: etf, chain: true, ibkr_iv: true}
+  MU:         {name: "Micron",               session: us, target_type: etf,   chain: true,  ibkr_iv: true}
+  "000660.KS": {name: "SK Hynix",            session: kr, target_type: etf,   chain: false, ibkr_iv: false}
+  "005930.KS": {name: "Samsung Electronics", session: kr, target_type: etf,   chain: false, ibkr_iv: false}
+  EWG:        {name: "Germany (DAX proxy)",  session: us, target_type: etf,   chain: true,  ibkr_iv: true}
+  EWQ:        {name: "France (CAC proxy)",   session: us, target_type: etf,   chain: true,  ibkr_iv: true}
+  EWJ:        {name: "Japan (Nikkei proxy)", session: us, target_type: etf,   chain: true,  ibkr_iv: true}
+  EWU:        {name: "UK (FTSE proxy)",      session: us, target_type: etf,   chain: true,  ibkr_iv: true}
+  EWC:        {name: "Canada (TSX proxy)",   session: us, target_type: etf,   chain: true,  ibkr_iv: true}
+  EEM:        {name: "Broad EM",             session: us, target_type: etf,   chain: true,  ibkr_iv: true}
+  FXI:        {name: "China Large-Cap",      session: us, target_type: etf,   chain: true,  ibkr_iv: true}
+  EWY:        {name: "South Korea",          session: us, target_type: etf,   chain: true,  ibkr_iv: true}
+  EWT:        {name: "Taiwan",               session: us, target_type: etf,   chain: true,  ibkr_iv: true}
+  INDA:       {name: "India",                session: us, target_type: etf,   chain: true,  ibkr_iv: true}
+  EWZ:        {name: "Brazil",               session: us, target_type: etf,   chain: true,  ibkr_iv: true}
+  EWW:        {name: "Mexico",               session: us, target_type: etf,   chain: true,  ibkr_iv: true}
+  "^GSPTSE":  {name: "S&P/TSX Composite",    session: ca, target_type: index, chain: false, ibkr_iv: false}
+  XFN.TO:     {name: "Canadian Financials",  session: ca, target_type: etf,   chain: false, ibkr_iv: false}
+  XEG.TO:     {name: "Canadian Energy",      session: ca, target_type: etf,   chain: false, ibkr_iv: false}
+  XMA.TO:     {name: "Canadian Materials",   session: ca, target_type: etf,   chain: false, ibkr_iv: false}
+
+# CBOE volatility complex (feature inputs, not forecast targets except ^VIX/^VVIX above)
+vol_indices: ["^VIX", "^VIX9D", "^VIX3M", "^VIX6M", "^VVIX", "^SKEW", "^VXN", "^RVX", "^VXD", "^OVX", "^GVZ"]
+
+# 10 cross-asset series with long history (ratios like HYG/LQD, RSP/SPY, XLY/XLP are derived)
+cross_series: ["^TNX", "^TYX", "DX-Y.NYB", "CL=F", "GC=F", "HG=F", "TLT", "HYG", "LQD", "RSP"]

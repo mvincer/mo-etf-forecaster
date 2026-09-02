@@ -253,9 +253,9 @@ def _one_group_cell(group: str, members: list[str], horizon: int, cfg: dict,
 def _one_ticker_cell(ticker: str, horizon: int, group_result: dict, cfg: dict,
                      fast: bool, jobs_inner: int) -> tuple[pd.DataFrame, dict, pd.DataFrame] | None:
     data = _load_ticker_data(ticker, [horizon])
-    if not data or horizon not in data[ticker]:
+    if not data or horizon not in data:
         return None
-    ds = data[ticker][horizon]
+    ds = data[horizon]
     dev_end = np.datetime64(group_result["dev_end"])
     configs = group_result["top_configs"][:3]
     if not configs:
@@ -280,8 +280,10 @@ def run(*, fast: bool = True, tickers: list[str] | None = None,
     cfg = search_cfg()
     horizons = horizons or cfg["horizons"]
     fastcfg = cfg["fast"]
-    screened = fastcfg["horizons_screened"] if fast else horizons
-    borrow = {2: 3, 4: 5} if fast else {}
+    screened = [h for h in (fastcfg["horizons_screened"] if fast else horizons)
+                if h in horizons] or list(horizons)
+    borrow = {h: s for h, s in {2: 3, 4: 5}.items()
+              if fast and h in horizons and s in screened}
     groups = universe_cfg()["groups"]
     tickers = tickers or all_tickers()
     jobs_inner = max(2, 32 // jobs)

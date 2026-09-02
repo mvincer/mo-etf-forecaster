@@ -27,9 +27,9 @@ log = logging.getLogger(__name__)
 def _forecast_cell(ticker: str, horizon: int, meta: dict, cfg: dict,
                    n_jobs: int = 2) -> dict | None:
     data = _load_ticker_data(ticker, [horizon])
-    if not data or horizon not in data[ticker]:
+    if not data or horizon not in data:
         return None
-    ds = data[ticker][horizon]
+    ds = data[horizon]
     config = meta.get("champion_config") or (meta.get("configs") or [None])[0]
     if not config:
         return None

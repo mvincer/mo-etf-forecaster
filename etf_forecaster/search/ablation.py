@@ -43,6 +43,11 @@ class AblationRun:
     def evaluate(self, blocks: set[str], stage: str) -> float:
         key = frozenset(blocks)
         if key in self._cache:
+            # still record the cell under this stage so ablation_results is complete
+            prior = next((r for r in self.records
+                          if r["blocks"] == (",".join(sorted(blocks)) or "PRICE_only")), None)
+            if prior is not None and prior["stage"] != stage:
+                self.records.append({**prior, "stage": stage})
             return self._cache[key]
         cols = select_columns(self.ds.feature_names, blocks, window=self.window)
         sub = self.ds.subset_columns(cols)

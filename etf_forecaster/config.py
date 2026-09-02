@@ -30,7 +30,12 @@ def load_env() -> None:
         return
     load_dotenv(REPO_ROOT / ".env")
     md = mo_dash_root()
-    for p in (md / "brokers" / "fred" / ".env", md / ".env", md / "app" / ".env"):
+    for p in (
+        md / "brokers" / "fred" / ".env",
+        md / "strategies" / "forecasting" / "fx_data_collect" / ".env",
+        md / ".env",
+        md / "app" / ".env",
+    ):
         if p.is_file():
             load_dotenv(p)
 
